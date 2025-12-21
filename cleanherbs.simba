@@ -1,0 +1,479 @@
+
+{$DEFINE SCRIPT_ID := 'clean-grimy-herbs-gui'}
+{$DEFINE SCRIPT_REVISION := '1'}
+
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+type
+  EState = (
+    ENSURE_BANK_OPEN,
+    DEPOSIT_IF_NEEDED,
+    WITHDRAW_GRIMY_BATCH,
+    CLOSE_BANK_FOR_CLEANING,
+    CLEAN_INVENTORY,
+    END_SCRIPT
+  );
+
+  TCleaner = record
+    State: EState;
+    GrimyNames: TStringArray;
+    CleanCounts: array of Int32;
+    Exclude: array of Boolean;
+    CurrentGrimy: String;
+    WithdrawBatch: Int32;
+    TrueRun: TStopwatch;
+    ReportIntervalMs: Int32;
+    LastSummaryMs: Int64;
+
+    RSW: TRSWalker;
+  end;
+
+
+  TCleanerConfig = record(TScriptForm)
+    TabSettings, TabHerbs: TTabSheet;
+    BankSelector: TLabeledComboBox;
+    HerbChecks: array of TLabeledCheckbox;
+    Config: TConfigJSON;
+  end;
+
+var
+  Bot: TCleaner;
+  CurrentBank: EBankChunk = EBankChunk.GRAND_EXCHANGE;
+  GUI: TCleanerConfig;
+
+
+const
+  HERB_NAMES: TStringArray = [
+    'Grimy guam leaf',
+    'Grimy marrentill',
+    'Grimy tarromin',
+    'Grimy harralander',
+    'Grimy ranarr weed',
+    'Grimy toadflax',
+    'Grimy irit leaf',
+    'Grimy avantoe',
+    'Grimy kwuarm',
+    'Grimy snapdragon',
+    'Grimy cadantine',
+    'Grimy lantadyme',
+    'Grimy dwarf weed',
+    'Grimy torstol'
+  ];
+
+
+procedure WriteMsg(const s: String);
+begin
+  WriteLn(SRL.TimeStamp() + ' [CleanHerbs]: ' + s);
+end;
+
+
+function ToCleanName(const grimyName: String): String;
+begin
+  Result := grimyName.Replace('Grimy ', '');
+end;
+
+function GetGrimyIndex(const name: String): Int32;
+var i: Int32;
+begin
+  Result := -1;
+  for i := 0 to High(Bot.GrimyNames) do
+    if Bot.GrimyNames[i].Lower() = name.Lower() then
+      Exit(i);
+end;
+
+function BankHasAllowedGrimy(var grimyName: String): Boolean;
+var i: Int32;
+begin
+  Result := False;
+  for i := 0 to High(Bot.GrimyNames) do
+  begin
+    if Bot.Exclude[i] then Continue;
+    if Bank.ContainsItem(Bot.GrimyNames[i]) then
+    begin
+      grimyName := Bot.GrimyNames[i];
+      Exit(True);
+    end;
+  end;
+end;
+
+function InventoryHasAllowedGrimy(): Boolean;
+var i: Int32;
+begin
+  Result := False;
+  for i := 0 to High(Bot.GrimyNames) do
+  begin
+    if Bot.Exclude[i] then Continue;
+    if Inventory.ContainsItem(Bot.GrimyNames[i]) then
+      Exit(True);
+  end;
+end;
+
+procedure OpenBankR();
+var opened: Boolean;
+begin
+  Banks.WalkOpen();
+  opened := Bank.IsOpen();
+  if opened then Exit;
+
+  if Bank.Open() then opened := Bank.IsOpen();
+  if opened then Exit;
+
+  Antiban.RandomRotate();
+  Wait(250);
+
+  if Bank.Open() then opened := Bank.IsOpen();
+
+  if not opened then
+    WriteMsg('Could not open bank. Ensure Map.SetupChunk(...) ran and you are near a bank booth.');
+end;
+
+procedure TCleaner.Init();
+var
+  z, i: Int32;
+begin
+  Mouse.Speed := SRL.NormalRange(16, 21);
+  Mouse.MissChance := 3;
+  Mouse.Distribution := MOUSE_DISTRIBUTION_GAUSS;
+
+  if not RSClient.IsLoggedIn() then
+    Login.LoginPlayer(False);
+
+  if RSClient.Mode <> ERSClientMode.FIXED then
+    TerminateScript(SRL.TimeStamp() + ' [CleanHerbs]: Client must be in fixed-classic');
+
+  z := Options.GetZoomLevel();
+  if not InRange(z, 0, 5) then
+    Options.SetZoomLevel(SRL.TruncatedGauss(0,5))
+  else
+    MM2MS.ZoomLevel := z;
+
+
+  Map.SetupChunk(CurrentBank.Get());
+  Objects.Setup(Map.Objects(), @Map.Walker);
+  NPCs.Setup(Map.NPCs(), @Map.Walker);
+
+  Self.RSW.Setup('world');
+
+  SetLength(Self.GrimyNames, Length(HERB_NAMES));
+  for i := 0 to High(HERB_NAMES) do
+    Self.GrimyNames[i] := HERB_NAMES[i];
+
+  SetLength(Self.CleanCounts, Length(Self.GrimyNames));
+
+
+  Self.CurrentGrimy := '';
+  Self.WithdrawBatch := 28;
+
+
+  Self.TrueRun.Start();
+  Self.ReportIntervalMs := 60 * 1000;
+  Self.LastSummaryMs := GetTimeRunning();
+
+  OpenBankR();
+  if Bank.IsOpen() then
+  begin
+    Bank.DepositAll();
+  end;
+end;
+
+procedure EnsureBankOpen();
+begin
+  if not Bank.IsOpen() then OpenBankR();
+end;
+
+procedure DepositIfNeeded();
+begin
+  if Inventory.CountEmptySlots() <> 28 then
+    Bank.DepositAll();
+end;
+
+function WithdrawGrimyBatch(): Boolean;
+var item: TRSBankItem;
+begin
+  Result := False;
+
+  if not BankHasAllowedGrimy(Bot.CurrentGrimy) then Exit(False);
+
+  item := TRSBankItem.Setup(Bot.CurrentGrimy, Bot.WithdrawBatch, False);
+  WriteMsg('Withdrawing grimy: ' + Bot.CurrentGrimy);
+
+  if Bank.WithdrawItem(item, True) then
+    Result := WaitUntil(Inventory.ContainsItem(Bot.CurrentGrimy), 100, 2500);
+end;
+
+procedure CloseBankForCleaning();
+begin
+  RSInterface.Close();
+  Wait(SRL.NormalRange(60, 90));
+end;
+
+function CleanInventory(): Boolean;
+var
+  slots: TIntegerArray;
+  i, idx, beforeCount, cleanedCount: Int32;
+  grimy, cleaned: String;
+begin
+  Result := False;
+
+  grimy := '';
+  for i := 0 to High(Bot.GrimyNames) do
+  begin
+    if Bot.Exclude[i] then Continue;
+    if Inventory.ContainsItem(Bot.GrimyNames[i]) then
+    begin
+      grimy := Bot.GrimyNames[i];
+      Break;
+    end;
+  end;
+  if grimy = '' then Exit(False);
+
+  idx := GetGrimyIndex(grimy);
+  cleaned := ToCleanName(grimy);
+  beforeCount := Inventory.CountItem(grimy);
+
+  WriteMsg('Cleaning: ' + grimy);
+
+  if Inventory.FindItem(grimy, slots) then
+  begin
+    for i := 0 to High(slots) do
+    begin
+      Inventory.ClickSlot(slots[i]);
+      Wait(SRL.NormalRange(70, 120));
+    end;
+  end;
+
+
+  while Inventory.ContainsItem(grimy) do
+  begin
+    if not Inventory.FindItem(grimy, slots) then Break;
+    for i := 0 to High(slots) do
+    begin
+      Inventory.ClickSlot(slots[i]);
+      Wait(SRL.NormalRange(70, 120));
+    end;
+  end;
+
+  Result := WaitUntil(not Inventory.ContainsItem(grimy), 80, 2000);
+
+
+  cleanedCount := beforeCount;
+  if (idx >= 0) and (cleanedCount > 0) then
+    Bot.CleanCounts[idx] += cleanedCount;
+
+  if Result then
+    WriteMsg('Cleaned into: ' + cleaned + ' (+' + IntToStr(cleanedCount) + ')');
+end;
+
+
+procedure PrintSummary();
+var
+  i, total: Int32;
+begin
+  total := 0;
+  for i := 0 to High(Bot.CleanCounts) do
+    total += Bot.CleanCounts[i];
+
+  WriteLn('');
+  WriteLn('======================');
+  WriteLn('  CleanAllGrimyHerbs  ');
+  WriteLn('======================');
+  WriteLn('Runtime: ' + SRL.MsToTime(Bot.TrueRun.ElapsedTime(), Time_Short));
+  WriteLn('Total cleaned: ' + IntToStr(total));
+  WriteLn('--- Per-herb cleaned ---');
+  for i := 0 to High(Bot.GrimyNames) do
+    if Bot.CleanCounts[i] > 0 then
+      WriteLn(Format('%s: %d', [Bot.GrimyNames[i], Bot.CleanCounts[i]]));
+  WriteLn('======================');
+end;
+
+
+procedure TPrintSummary();
+var nowMs: Int64;
+begin
+  nowMs := GetTimeRunning();
+  if (nowMs - Bot.LastSummaryMs) >= Bot.ReportIntervalMs then
+  begin
+    PrintSummary();
+    Bot.LastSummaryMs := nowMs;
+  end;
+end;
+
+
+function GetState(): EState;
+var dummy: String;
+begin
+  if ChooseOption.IsOpen() then Exit(EState.CLOSE_BANK_FOR_CLEANING);
+
+  if InventoryHasAllowedGrimy() then
+  begin
+    if Bank.IsOpen() then Exit(EState.CLOSE_BANK_FOR_CLEANING);
+    Exit(EState.CLEAN_INVENTORY);
+  end;
+
+  if not Bank.IsOpen() then Exit(EState.ENSURE_BANK_OPEN);
+
+  if Inventory.CountEmptySlots() <> 28 then Exit(EState.DEPOSIT_IF_NEEDED);
+
+  if not BankHasAllowedGrimy(dummy) then Exit(EState.END_SCRIPT);
+  Exit(EState.WITHDRAW_GRIMY_BATCH);
+end;
+
+
+procedure Run();
+begin
+  Bot.Init();
+
+  while True do
+  begin
+    Bot.State := GetState();
+
+    case Bot.State of
+      EState.ENSURE_BANK_OPEN:
+        EnsureBankOpen;
+
+      EState.DEPOSIT_IF_NEEDED:
+        DepositIfNeeded;
+
+      EState.WITHDRAW_GRIMY_BATCH:
+        begin
+          if not WithdrawGrimyBatch() then
+          begin
+            Wait(150);
+          end
+          else
+          begin
+            CloseBankForCleaning();
+          end;
+        end;
+
+      EState.CLOSE_BANK_FOR_CLEANING:
+        CloseBankForCleaning;
+
+      EState.CLEAN_INVENTORY:
+        begin
+          if CleanInventory() then
+          begin
+            OpenBankR();
+            if Bank.IsOpen() then Bank.DepositAll();
+            TPrintSummary();
+          end
+          else
+            WriteMsg('Nothing to clean in inventory.');
+        end;
+
+      EState.END_SCRIPT:
+        begin
+          PrintSummary();
+          WriteMsg('All grimy herbs cleaned. Stopping.');
+          Break;
+        end;
+    end;
+    Antiban.DoAntiban();
+    WL.Activity.Restart();
+    PrintSummary();
+  end;
+end;
+
+procedure TCleanerConfig.BuildHerbCheckboxColumn();
+var
+  i: Int32;
+  leftX, topY, width, height, gapY, y: Int32;
+begin
+
+  leftX  := 20;
+  topY   := 16;
+  width  := 260;
+  height := 18;
+  gapY   := 18;
+
+
+  if (Self.TabHerbs.GetWidth()  = 0) then Self.TabHerbs.SetWidth(600);
+  if (Self.TabHerbs.GetHeight() = 0) then Self.TabHerbs.SetHeight(420);
+
+  Self.TabHerbs.GetFont().SetSize(10);
+
+  SetLength(Self.HerbChecks, Length(HERB_NAMES));
+
+  y := topY;
+  for i := 0 to High(HERB_NAMES) do
+  begin
+
+    Self.HerbChecks[i].Create(
+      Self.TabHerbs,
+      HERB_NAMES[i],
+      'Uncheck to exclude herb.',
+      [leftX, y],
+      [0, 0],
+      [leftX + width, y + height],
+      False
+    );
+
+    Self.HerbChecks[i].SetLeft(leftX);
+    Self.HerbChecks[i].SetTop(y);
+    Self.HerbChecks[i].SetWidth(width);
+    Self.HerbChecks[i].SetHeight(height);
+    Self.HerbChecks[i].SetChecked(True);
+
+    y := y + gapY;
+  end;
+end;
+
+
+procedure TCleanerConfig.StartScript(sender: TObject); override;
+var
+  i: Int32;
+begin
+  CurrentBank := EBankChunk(Self.BankSelector.GetItemIndex());
+
+  SetLength(Bot.Exclude, Length(HERB_NAMES));
+  for i := 0 to High(HERB_NAMES) do
+    Bot.Exclude[i] := not Self.HerbChecks[i].IsChecked();
+
+  Self.Config.Setup('clean-grimy-herbs');
+  Self.Config.Put('bank_index', Self.BankSelector.GetItemIndex());
+  for i := 0 to High(HERB_NAMES) do
+    Self.Config.Put('herb_' + IntToStr(i), Self.HerbChecks[i].IsChecked());
+
+  inherited;
+end;
+
+procedure TCleanerConfig.Run(); override;
+var
+  i: Int32;
+begin
+  Self.Setup('Clean All Grimy Herbs');
+
+  Self.AddTab('Script Settings');
+  Self.TabSettings := Self.Tabs[High(Self.Tabs)];
+  Self.AddTab('Herbs');
+  Self.TabHerbs := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(Self.TabSettings);
+
+  Self.BankSelector := Self.CreateBankSettingsV2(Self.TabSettings, [50, 200], [0,0]);
+
+  Self.CreateAntibanManager();
+  Self.CreateWaspLibSettings();
+
+  BuildHerbCheckboxColumn();
+
+  Self.Start.setOnClick(@Self.StartScript);
+
+  Self.Config.Setup('clean-grimy-herbs');
+  if Self.Config.Has('bank_index') then
+    Self.BankSelector.SetItemIndex(Self.Config.GetInt('bank_index'));
+  for i := 0 to High(HERB_NAMES) do
+    if Self.Config.Has('herb_' + IntToStr(i)) then
+      Self.HerbChecks[i].SetChecked(Self.Config.GetBoolean('herb_' + IntToStr(i)))
+    else
+      Self.HerbChecks[i].SetChecked(True);
+
+  inherited;
+end;
+
+begin
+  GUI.Run();
+  Run();
+end.
+
