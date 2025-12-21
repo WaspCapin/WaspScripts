@@ -239,7 +239,7 @@ begin
     for i := 0 to High(slots) do
     begin
       Inventory.ClickSlot(slots[i]);
-      Wait(SRL.NormalRange(70, 120));
+      Wait(SRL.NormalRange(120, 150));
     end;
   end;
 
@@ -473,5 +473,6 @@ begin
   GUI.Run();
   Run();
 end.
+
 
 
