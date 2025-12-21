@@ -1,5 +1,5 @@
 
-{$DEFINE SCRIPT_ID := 'clean-grimy-herbs-gui'}
+{$DEFINE SCRIPT_ID := 'clean-grimy-herbs'}
 {$DEFINE SCRIPT_REVISION := '1'}
 
 {$I SRL-T/osr.simba}
@@ -473,6 +473,7 @@ begin
   GUI.Run();
   Run();
 end.
+
 
 
 
