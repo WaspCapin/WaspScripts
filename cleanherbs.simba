@@ -453,9 +453,6 @@ begin
 
   Self.BankSelector := Self.CreateBankSettingsV2(Self.TabSettings, [50, 200], [0,0]);
 
-  Self.CreateAntibanManager();
-  Self.CreateWaspLibSettings();
-
   BuildHerbCheckboxColumn();
 
   Self.Start.setOnClick(@Self.StartScript);
@@ -476,4 +473,5 @@ begin
   GUI.Run();
   Run();
 end.
+
 
