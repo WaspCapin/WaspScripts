@@ -398,7 +398,6 @@ begin
     CansNeeded := Ceil((Bot.PotsPerTrip - CurrentCharges) / 8.0);
     if CansNeeded > 3 then
       CansNeeded := 3;
-    WriteMsg('Need to withdraw ' + IntToStr(CansNeeded) + ' more watering cans (max 3)');
     if Bot.WateringCanType = GRICOLLERS then
     begin
       if CurrentCharges = 0 then
@@ -940,3 +939,4 @@ begin
   GUI.Run();
   Run();
 end.
+
