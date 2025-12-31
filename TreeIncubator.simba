@@ -158,7 +158,7 @@ end;
 function TTreeIncubator.FindWateringCanWithCharges(out Slot: Int32): Boolean;
 var
   Slots: TIntegerArray;
-  i, Charges: Int32;
+  i: Int32;
 begin
   Result := False;
   Slot := -1;
@@ -186,7 +186,6 @@ begin
   end;
   WriteMsg('No watering cans with charges found');
 end;
-
 function TTreeIncubator.CountSeedlings(): Int32;
 var
   SeedlingName, WateredName: String;
@@ -284,7 +283,7 @@ end;
 function WithdrawSupplies(): Boolean;
 var
   item: TRSBankItem;
-  SeedsInInventory, CurrentCharges, CansNeeded, i, j, EmptySlots, TotalSeeds, ToolSlots, BankSeeds, attempts, attempt: Int32;
+  CurrentCharges, CansNeeded, i, j, TotalSeeds, ToolSlots, attempt: Int32;
   GotCans, foundCans, hasAnyCans: Boolean;
   SeedSlots, canSlots: TIntegerArray;
 begin
@@ -398,6 +397,7 @@ begin
     CansNeeded := Ceil((Bot.PotsPerTrip - CurrentCharges) / 8.0);
     if CansNeeded > 3 then
       CansNeeded := 3;
+    WriteMsg('Need to withdraw ' + IntToStr(CansNeeded) + ' more watering cans (max 3)');
     if Bot.WateringCanType = GRICOLLERS then
     begin
       if CurrentCharges = 0 then
@@ -518,31 +518,10 @@ begin
   item := TRSBankItem.Setup(FILLED_PLANT_POT, Bot.PotsPerTrip, False);
   if not Bank.WithdrawItem(item, True) then
   begin
-    WriteMsg('No filled pots - trying to make them...');
-    item := TRSBankItem.Setup(PLANT_POT, Bot.PotsPerTrip, False);
-    if not Bank.WithdrawItem(item, True) then
-    begin
-      WriteMsg('ERROR: No plant pots in bank!');
-      Exit(False);
-    end;
-    Wait(SRL.NormalRange(120, 200));
-    item := TRSBankItem.Setup(BUCKET_OF_COMPOST, Bot.PotsPerTrip, False);
-    if not Bank.WithdrawItem(item, True) then
-    begin
-      WriteMsg('ERROR: No compost in bank!');
-      Exit(False);
-    end;
-    Wait(SRL.NormalRange(120, 200));
-    RSInterface.Close();
-    Wait(SRL.NormalRange(60, 90));
-    FillPlantPots();
-    OpenBankSafe();
-    if Inventory.ContainsItem('Bucket') then
-    begin
-      Bank.DepositItem('Bucket', True);
-      Wait(SRL.NormalRange(120, 200));
-    end;
+    WriteMsg('ERROR: No filled plant pots in bank!');
+    Exit(False);
   end;
+  Wait(SRL.NormalRange(120, 200));
   Result := True;
 end;
 function PlantAllSeeds(): Boolean;
@@ -592,9 +571,9 @@ end;
 function WaterAllSeeds(): Boolean;
 var
   CanSlot: Int32;
-  SeedlingSlots, slots: TIntegerArray;
-  SeedlingName, CanName: String;
-  i, j, k: Int32;
+  SeedlingSlots: TIntegerArray;
+  SeedlingName: String;
+  i: Int32;
   WateredCount: Int32;
   CurrentCanCharges: Int32;
 begin
@@ -646,7 +625,10 @@ begin
       end;
       WriteMsg('Switched to new can with ' + IntToStr(CurrentCanCharges) + ' charges in slot ' + IntToStr(CanSlot));
     end;
-    WriteMsg('Watering seedling ' + IntToStr(i + 1) + '/' + IntToStr(Length(SeedlingSlots)) + ' (can has ' + IntToStr(CurrentCanCharges) + ' charges left)');
+    if Bot.WateringCanType = GRICOLLERS then
+      WriteMsg('Watering seedling ' + IntToStr(i + 1) + '/' + IntToStr(Length(SeedlingSlots)))
+    else
+      WriteMsg('Watering seedling ' + IntToStr(i + 1) + '/' + IntToStr(Length(SeedlingSlots)) + ' (can has ' + IntToStr(CurrentCanCharges) + ' charges left)');
     Inventory.Use(CanSlot, SeedlingSlots[i]);
     Wait(SRL.NormalRange(350, 450)); 
     if WaitUntil(Inventory.ContainsItem(SeedlingName + ' (w)'), 100, 2000) then
@@ -732,14 +714,22 @@ begin
     Exit(GetState());
   end;
 end;
-
+procedure PrintProgress();
+begin
+  WriteLn('');
+  WriteLn('======================');
+  WriteLn('  Tree Incubator');
+  WriteLn('======================');
+  WriteLn('Runtime: ' + SRL.MsToTime(Bot.TrueRun.ElapsedTime(), Time_Short));
+  WriteLn('Seedlings made: ' + IntToStr(Bot.SeedlingsMade));
+  WriteLn('Current seed: ' + Bot.SeedName);
+  WriteLn('======================');
+end;
 procedure Run();
 var
-  item: TRSBankItem;
-  wateredName, seedlingName: String;
-  DepositedAny, IsToolSlot: Boolean;
   ItemsBanked, slot, i: Int32;
-  SlotItems, TrowelSlots, GricollersSlots, CanSlots, ToolSlots: TIntegerArray;
+  IsToolSlot: Boolean;
+  TrowelSlots, GricollersSlots, CanSlots, ToolSlots, SeedSlots: TIntegerArray;
 begin
   Bot.Init();
   while True do
@@ -779,13 +769,16 @@ begin
         end;
       EState.DEPOSIT_SEEDLINGS:
         begin
-          WriteMsg('Banking everything except tools...');
+          WriteMsg('Banking everything except tools and seeds...');
           ItemsBanked := 0;
           ToolSlots := [];
+          
           if Inventory.FindItem(GARDENING_TROWEL, TrowelSlots) then
             ToolSlots += TrowelSlots;
           if Inventory.FindItem(GRICOLLERS_CAN, GricollersSlots) then
             ToolSlots += GricollersSlots;
+          if Inventory.FindItem(Bot.SeedName, SeedSlots) then
+            ToolSlots += SeedSlots;
           for i := 8 downto 1 do
           begin
             if Inventory.FindItem('Watering can(' + IntToStr(i) + ')', CanSlots) then
@@ -831,11 +824,11 @@ begin
           end;
           WriteMsg('Banked ' + IntToStr(ItemsBanked) + ' items');
           ToolSlots := [];
-
+          PrintProgress();
         end;
       EState.END_SCRIPT:
         begin
-
+          PrintProgress();
           WriteMsg('All seeds processed! Stopping.');
           Break;
         end;
@@ -939,4 +932,3 @@ begin
   GUI.Run();
   Run();
 end.
-
