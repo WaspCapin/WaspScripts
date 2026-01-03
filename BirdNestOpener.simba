@@ -1,0 +1,407 @@
+{$DEFINE SCRIPT_GUI}
+{$I SRL-T/osr.simba}
+{$I WaspLib/osr.simba}
+
+begin
+  Login.PlayerIndex := 0;
+end;
+
+type
+  EBirdNestType = (
+    NEST_SEED,
+    NEST_RING,
+    NEST_EGG
+  );
+
+  TBirdNestOpener = record(TBaseBankScript)
+    NestType: EBirdNestType;
+    CrushNests: Boolean;
+    WithdrawMin, WithdrawMax: Int32;
+    NestsProcessed: Int32;
+  end;
+
+var
+  BirdNestOpener: TBirdNestOpener;
+  CurrentBank: EBankChunk = EBankChunk.GRAND_EXCHANGE;
+
+procedure TAntiban.Setup(); override;
+begin
+  Self.Skills := [ERSSkill.HERBLORE, ERSSkill.TOTAL];
+  Self.MinZoom := 0;
+  Self.MaxZoom := 10;
+
+  inherited;
+end;
+
+procedure TBirdNestOpener.Setup();
+begin
+  Self.Name := 'Bird Nest Opener';
+  
+  Map.SetupChunk(CurrentBank.Get());
+  Objects.Setup(Map.Objects(), @Map.Walker);
+  NPCs.Setup(Map.NPCs(), @Map.Walker);
+  
+  Self.WithdrawMin := 10;
+  Self.WithdrawMax := 12;
+  Self.NestsProcessed := 0;
+  
+  Self.ActionProfit := 0;
+end;
+
+function TBirdNestOpener.GetNestName(): String;
+begin
+  case Self.NestType of
+    NEST_SEED: Result := 'Bird nest (seeds)';
+    NEST_RING: Result := 'Bird nest (ring)';
+    NEST_EGG: Result := 'Bird nest (egg)';
+  end;
+end;
+
+function TBirdNestOpener.GetEmptyNestName(): String;
+begin
+  Result := 'Bird nest';
+end;
+
+function TBirdNestOpener.HasNestsInInventory(): Boolean;
+var
+  nestName: String;
+begin
+  nestName := Self.GetNestName();
+  Result := Inventory.ContainsItem(nestName);
+end;
+
+function TBirdNestOpener.HasEmptyNestsInInventory(): Boolean;
+var
+  emptyNestName: String;
+begin
+  emptyNestName := Self.GetEmptyNestName();
+  Result := Inventory.ContainsItem(emptyNestName);
+end;
+
+function TBirdNestOpener.OpenNest(): Boolean;
+var
+  nestName: String;
+  nestSlot: Int32;
+  invCount: Int32;
+begin
+  nestName := Self.GetNestName();
+  
+  if not Inventory.FindItem(nestName, nestSlot) then
+    Exit(False);
+  
+  invCount := Inventory.Count();
+  Inventory.ClickSlot(nestSlot, 'Open');
+  
+  Result := WaitUntil(Inventory.Count() <> invCount, 100, 3000);
+  
+  if Result then
+  begin
+    Self.NestsProcessed += 1;
+    Wait(200, 400);
+  end;
+end;
+
+function TBirdNestOpener.CrushNest(): Boolean;
+var
+  emptyNestName: String;
+  nestSlot, mortarSlot: Int32;
+  nestCount: Int32;
+  timeout: TCountDown;
+begin
+  emptyNestName := Self.GetEmptyNestName();
+  
+  // Find pestle and mortar
+  if not Inventory.FindItem('Pestle and mortar', mortarSlot) then
+  begin
+    WriteLn('No pestle and mortar found in inventory!');
+    Exit(False);
+  end;
+  
+  // Find empty nest
+  if not Inventory.FindItem(emptyNestName, nestSlot) then
+    Exit(False);
+  
+  nestCount := Inventory.CountItem(emptyNestName);
+  WriteLn('Starting to crush ' + IntToStr(nestCount) + ' empty nests');
+  
+  // Use pestle and mortar on nest once - this will crush all
+  Inventory.ClickSlot(mortarSlot);
+  Wait(100, 200);
+  Inventory.ClickSlot(nestSlot);
+  
+  // Wait for all nests to be crushed, checking every 2 seconds
+  timeout.Init(60000); // Max 60 seconds
+  while Inventory.ContainsItem(emptyNestName) and not timeout.IsFinished() do
+  begin
+    WriteLn('Still crushing... ' + IntToStr(Inventory.CountItem(emptyNestName)) + ' nests remaining');
+    Wait(2000);
+  end;
+  
+  Result := not Inventory.ContainsItem(emptyNestName);
+  
+  if Result then
+  begin
+    WriteLn('Finished crushing all nests');
+    Wait(200, 400);
+  end
+  else
+  begin
+    WriteLn('Timeout while crushing nests');
+  end;
+end;
+
+function TBirdNestOpener.ProcessNests(): Boolean;
+var
+  timeout: TCountDown;
+begin
+  timeout.Init(60000);
+  
+  // Open all nests
+  while Self.HasNestsInInventory() and not timeout.IsFinished() do
+  begin
+    if not Self.OpenNest() then
+    begin
+      Wait(500, 800);
+      Continue;
+    end;
+    
+    Wait(100, 300);
+  end;
+  
+  // If we're crushing nests, crush all empty nests in one action
+  if Self.CrushNests and Self.HasEmptyNestsInInventory() then
+  begin
+    if not Self.CrushNest() then
+    begin
+      WriteLn('Failed to crush nests');
+    end;
+  end;
+  
+  Result := not Self.HasNestsInInventory();
+end;
+
+function TBirdNestOpener.BankNests(): Boolean;
+var
+  nestName: String;
+  withdrawAmount: Int32;
+  mortarSlot, i: Int32;
+  slots: TIntegerArray;
+  bankItem: TRSBankItem;
+begin
+  if Bank.WalkOpen() then
+  begin
+    Wait(500, 800);
+    
+    // Deposit all except pestle and mortar if crushing
+    if Self.CrushNests then
+    begin
+      // Find pestle and mortar slot to keep it
+      if Inventory.FindItem('Pestle and mortar', mortarSlot) then
+      begin
+        // Deposit everything except the mortar slot
+        for i := 0 to 27 do
+          if i <> mortarSlot then
+            slots += i;
+        
+        for i := 0 to High(slots) do
+        begin
+          if Inventory.IsSlotUsed(slots[i]) then
+          begin
+            Mouse.Move(Inventory.GetSlotBox(slots[i]));
+            Mouse.Click(MOUSE_RIGHT);
+            Wait(100, 200);
+            if ChooseOption.Select('Deposit-All') then
+              Wait(50, 100);
+          end;
+        end;
+      end
+      else
+      begin
+        // No mortar in inventory, deposit all
+        if not Bank.DepositAll() then
+          Exit(False);
+      end;
+    end
+    else
+    begin
+      if not Bank.DepositAll() then
+        Exit(False);
+    end;
+    
+    Wait(300, 600);
+    
+    // Random withdraw amount
+    withdrawAmount := Random(Self.WithdrawMin, Self.WithdrawMax + 1);
+    
+    // Withdraw nests
+    nestName := Self.GetNestName();
+    bankItem.Setup(nestName, withdrawAmount, False);
+    if not Bank.WithdrawItem(bankItem, True) then
+    begin
+      WriteLn('Failed to withdraw nests or no nests left in bank');
+      Exit(False);
+    end;
+    
+    Wait(300, 600);
+    
+    // Withdraw pestle and mortar if crushing and not in inventory
+    if Self.CrushNests and not Inventory.ContainsItem('Pestle and mortar') then
+    begin
+      bankItem.Setup('Pestle and mortar', 1, False);
+      if not Bank.WithdrawItem(bankItem, True) then
+      begin
+        WriteLn('Failed to withdraw pestle and mortar');
+        Exit(False);
+      end;
+      Wait(300, 600);
+    end;
+    
+    Result := Bank.Close();
+  end;
+end;
+
+procedure TBirdNestOpener.Run(maxActions: Int32; maxTime: Int64);
+var
+  shouldStop: Boolean;
+begin
+  Self.Setup();
+
+  shouldStop := False;
+  
+  repeat
+    if Self.BankNests() then
+    begin
+      Wait(500, 1000);
+      
+      if Self.ProcessNests() then
+      begin
+        Wait(500, 1000);
+        Self.TotalActions += 1;
+      end
+      else
+      begin
+        WriteLn('Failed to process nests');
+        Wait(2000, 3000);
+      end;
+    end
+    else
+    begin
+      WriteLn('Banking failed - likely out of nests');
+      shouldStop := True;
+    end;
+
+    Self.TotalActions := Self.NestsProcessed;
+    Self.DoAntiban();
+    
+    // Check if we should stop based on max actions or time
+    if (maxActions > 0) and (Self.TotalActions >= maxActions) then
+      shouldStop := True;
+    if (maxTime > 0) and (GetTimeRunning() >= maxTime) then
+      shouldStop := True;
+      
+  until shouldStop;
+end;
+
+{$IFDEF SCRIPT_GUI}
+type
+  TBirdNestOpenerConfig = record(TScriptForm)
+    NestTypeSelector: TLabeledCombobox;
+    CrushNestsCheckbox: TLabeledCheckbox;
+    WithdrawMinSelector: TLabeledEdit;
+    WithdrawMaxSelector: TLabeledEdit;
+    BankSelector: TLabeledCombobox;
+  end;
+
+procedure TBirdNestOpenerConfig.StartScript(sender: TObject); override;
+begin
+  CurrentBank := EBankChunk(Self.BankSelector.GetItemIndex());
+  
+  // Set values directly on the script
+  case LowerCase(Self.NestTypeSelector.GetText()) of
+    'seeds': BirdNestOpener.NestType := NEST_SEED;
+    'ring': BirdNestOpener.NestType := NEST_RING;
+    'egg': BirdNestOpener.NestType := NEST_EGG;
+    else BirdNestOpener.NestType := NEST_SEED;
+  end;
+  
+  BirdNestOpener.CrushNests := Self.CrushNestsCheckbox.IsChecked();
+  BirdNestOpener.WithdrawMin := StrToIntDef(Self.WithdrawMinSelector.GetText(), 10);
+  BirdNestOpener.WithdrawMax := StrToIntDef(Self.WithdrawMaxSelector.GetText(), 12);
+  
+  // Clamp withdraw values
+  BirdNestOpener.WithdrawMin := Max(10, Min(14, BirdNestOpener.WithdrawMin));
+  BirdNestOpener.WithdrawMax := Max(10, Min(14, BirdNestOpener.WithdrawMax));
+  
+  inherited;
+end;
+
+procedure TBirdNestOpenerConfig.Run(); override;
+var
+  tab: TTabSheet;
+  nestTypeStr: String;
+begin
+  Self.Setup('Bird Nest Opener');
+  Self.Start.SetOnClick(@Self.StartScript);
+
+  Self.AddTab('Script Settings');
+  tab := Self.Tabs[High(Self.Tabs)];
+
+  Self.CreateAccountManager(tab);
+
+  Self.BankSelector := Self.CreateBankSettingsV2(tab, [50, 200], [0,0]);
+
+  with Self.NestTypeSelector do
+  begin
+    Create(tab);
+    SetCaption('Nest Type:');
+    SetLeft(TControl.AdjustToDPI(40));
+    SetTop(TControl.AdjustToDPI(290));
+    SetStyle(csDropDownList);
+    AddItemArray(['Seeds', 'Ring', 'Egg']);
+    SetItemIndex(0);
+  end;
+
+  with Self.CrushNestsCheckbox do
+  begin
+    Create(tab);
+    SetCaption('Crush empty nests?');
+    SetLeft(Self.NestTypeSelector.GetLeft());
+    SetTop(Self.NestTypeSelector.GetTop() + TControl.AdjustToDPI(60));
+    SetChecked(False);
+  end;
+
+  with Self.WithdrawMinSelector do
+  begin
+    Create(tab);
+    SetCaption('Withdraw Min (10-14):');
+    SetLeft(Self.CrushNestsCheckbox.GetLeft());
+    SetTop(Self.CrushNestsCheckbox.GetTop() + TControl.AdjustToDPI(60));
+    SetText('10');
+  end;
+
+  with Self.WithdrawMaxSelector do
+  begin
+    Create(tab);
+    SetCaption('Withdraw Max (10-14):');
+    SetLeft(Self.WithdrawMinSelector.GetLeft());
+    SetTop(Self.WithdrawMinSelector.GetTop() + TControl.AdjustToDPI(60));
+    SetText('12');
+  end;
+
+  Self.CreateAntibanManager();
+  Self.CreateWaspLibSettings();
+
+  inherited;
+end;
+
+var
+  BirdNestOpenerConfig: TBirdNestOpenerConfig;
+{$ENDIF}
+
+begin
+  {$IFDEF SCRIPT_GUI}
+  BirdNestOpenerConfig.Run();
+  {$ENDIF}
+  
+  BirdNestOpener.Run(WLSettings.MaxActions, WLSettings.MaxTime);
+end.
