@@ -191,7 +191,7 @@ begin
 
   if not BankHasAllowedGrimy(Bot.CurrentGrimy) then Exit(False);
 
-  item := TRSBankItem.Setup(Bot.CurrentGrimy, Bot.WithdrawBatch, False);
+  item := TRSBankItem.Setup(Bot.CurrentGrimy, Bank.QUANTITY_ALL, False);
   WriteMsg('Withdrawing grimy: ' + Bot.CurrentGrimy);
 
   if Bank.WithdrawItem(item, false) then
@@ -469,6 +469,7 @@ begin
   GUI.Run();
   Run();
 end.
+
 
 
 
