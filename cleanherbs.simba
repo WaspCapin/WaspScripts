@@ -194,7 +194,7 @@ begin
   item := TRSBankItem.Setup(Bot.CurrentGrimy, Bot.WithdrawBatch, False);
   WriteMsg('Withdrawing grimy: ' + Bot.CurrentGrimy);
 
-  if Bank.WithdrawItem(item, True) then
+  if Bank.WithdrawItem(item, false) then
     Result := WaitUntil(Inventory.ContainsItem(Bot.CurrentGrimy), 100, 2500);
 end;
 
@@ -469,6 +469,7 @@ begin
   GUI.Run();
   Run();
 end.
+
 
 
 
